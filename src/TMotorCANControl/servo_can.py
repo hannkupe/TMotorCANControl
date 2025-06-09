@@ -158,10 +158,10 @@ class servo_command:
 
         Args:
             position: Position in deg
-            velocity: Velocity in RPM
+            velocity: Velocity in ERPM
             current: Current in amps
             duty: Duty cycle in ratio (-1 to 1)
-            acceleration: acceleration in rad/s^2
+            acceleration: acceleration in ERPM/s
         """
         self.position = position
         self.velocity = velocity
@@ -199,6 +199,7 @@ class motorListener(can.Listener):
         """
         data = bytes(msg.data)
         ID = msg.arbitration_id & 0x00000FF
+        #print(ID) #uncomment this if you're not sure what the ID is and this will give you the motor ID
         if ID == self.motor.ID:
             self.motor._update_state_async(self.canman.parse_servo_message(data))
 
@@ -396,7 +397,7 @@ class CAN_Manager_servo(object):
             Data: This is obtained from the datasheet.
         """
 
-        self.send_servo_message(motor_id, [ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0XFC], 0)
+        self.send_servo_message(motor_id, [ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0XFC])
         
     # send the power off code
     def power_off(self, motor_id):
@@ -406,7 +407,7 @@ class CAN_Manager_servo(object):
         Args:
             motor_id: The CAN ID of the motor to send the message to.
         """
-        self.send_servo_message(motor_id, [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0XFD], 0)
+        self.send_servo_message(motor_id, [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0XFD])
 
 
 #* Code for the working of different modes in servo mode. 
@@ -503,9 +504,11 @@ class CAN_Manager_servo(object):
         Send a servo control message for position control mode, with specified velocity and acceleration
         This will be a trapezoidal speed profile.
 
+        These are the specified units from the driver user manual
+        
         Args:
             controller_id: CAN ID of the motor to send the message to
-            pos: desired position in 
+            pos: desired position in degrees
             spd: desired max speed in ERPM
             RPA: desired acceleration ERPM/s
         """
@@ -531,13 +534,13 @@ class CAN_Manager_servo(object):
             A servo_motor_state object representing the state based on the data recieved.
         """
         # using numpy to convert signed/unsigned integers
-        pos_int = np.int16(data[0] << 8 | data[1])
-        spd_int = np.int16(data[2] << 8 | data[3])
-        cur_int = np.int16(data[4] << 8 | data[5])
+        pos_int = int.from_bytes(data[0:2], byteorder='big', signed=True)
+        spd_int = int.from_bytes(data[2:4], byteorder='big', signed=True)
+        cur_int = int.from_bytes(data[4:6], byteorder='big', signed=True)
         motor_pos= float( pos_int * 0.1) # motor position
         motor_spd= float( spd_int * 10.0) # motor speed
         motor_cur= float( cur_int * 0.01) # motor current
-        motor_temp= np.int16(data[6])  # motor temperature
+        motor_temp = int.from_bytes([data[6]], byteorder='big', signed=True) # motor temperature
         motor_error= data[7] # motor error mode
         if self.debug:
             print(data)
@@ -733,7 +736,7 @@ class TMotorManager_servo_can():
         elif self._control_state == _TMotorManState_Servo.VELOCITY:
             self._canman.comm_can_set_rpm(self.ID, self._command.velocity)
         elif self._control_state == _TMotorManState_Servo.POSITION:
-            self._canman.comm_can_set_pos(self.ID, self._command.position)
+            self._canman.comm_can_set_pos(self.ID, self._command.position, 0 , 0) #set pos requires args for vel, acc even if they will not be used
         elif self._control_state == _TMotorManState_Servo.POSITION_VELOCITY:
             self._canman.comm_can_set_pos_spd(self.ID, self._command.position, self._command.velocity, self._command.acceleration)
         elif self._control_state == _TMotorManState_Servo.IDLE:
@@ -806,14 +809,14 @@ class TMotorManager_servo_can():
         Returns:
             The most recently updated output velocity in RPM
         """
-        return self._motor_state.velocity / Servo_Params[self.type]["NUM_POLE_PAIRS"]
+        return self._motor_state.velocity / Servo_Params[self.type]["NUM_POLE_PAIRS"] #convert ERPM to RPM
 
     def get_output_acceleration_radians_per_second_squared(self):
         """
         Returns:
             The most recently updated output acceleration in radians per second per second
         """
-        return (self._motor_state.acceleration / Servo_Params[self.type]["NUM_POLE_PAIRS"]) * ((2*np.pi)/60)
+        return (self._motor_state.acceleration / Servo_Params[self.type]["NUM_POLE_PAIRS"]) * ((2*np.pi)/60) #convert from ERPM/s to rad/s^2
 
     def get_output_torque_newton_meters(self):
         """
@@ -870,18 +873,17 @@ class TMotorManager_servo_can():
         Update the current command to the desired position, when in position or position-velocity mode.
         Note, this does not send a command, it updates the TMotorManager's saved command,
         which will be sent when update() is called.
+        
+        These are the specified units from the driver user manual
 
         Args:
-            pos: The desired output angle in deg
+            pos: The desired output angle in deg 
             vel: The desired speed to get there in ERPM (when in POSITION_VELOCITY mode)
             acc: The desired acceleration to get there in ERPM/s (when in POSITION_VELOCITY mode)
         """
         if np.abs(pos) >= Servo_Params[self.type]["P_max"]:
             raise RuntimeError("Cannot control using impedance mode for angles with magnitude greater than " + str(Servo_Params[self.type]["P_max"]) + "degrees!")
         
-        pos = (pos)
-        vel = (vel)
-        acc = (acc)
         if self._control_state == _TMotorManState_Servo.POSITION_VELOCITY:
             self._command.position = pos
             self._command.velocity = vel
@@ -1018,7 +1020,7 @@ class TMotorManager_servo_can():
     # Pretty stuff
     def __str__(self):
         """Prints the motor's device info and current"""
-        return self.device_info_string() + " | Position: " + '{: 1f}'.format(round(self.position,3)) + " deg | Velocity: " + '{: 1f}'.format(round(self.velocity,3)) + " rpm | current: " + '{: 1f}'.format(round(self.current_qaxis,3)) + " A | temp: " + '{: 1f}'.format(round(self.temperature,0)) + " C"
+        return self.device_info_string() + " | Position: " + '{: 1f}'.format(round(self.position,3)) + " deg | Velocity: " + '{: 1f}'.format(round(self.velocity,3)) + " ERPM | current: " + '{: 1f}'.format(round(self.current_qaxis,3)) + " A | temp: " + '{: 1f}'.format(round(self.temperature,0)) + " C"
 
     def device_info_string(self):
         """Prints the motor's ID and device type."""
